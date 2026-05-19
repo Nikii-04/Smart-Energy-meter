@@ -1,0 +1,209 @@
+#define BLYNK_TEMPLATE_ID "TMPLxxxxxxx"
+#define BLYNK_TEMPLATE_NAME "Energy Meter"
+#define BLYNK_AUTH_TOKEN "YourAuthToken"
+#define BLYNK_PRINT Serial
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <BlynkSimpleEsp32.h>
+#include "EmonLib.h"
+
+char ssid[] = "realme 10 Pro 5G";
+char pass[] = "abcdefgh";
+
+String botToken = "8769818753:AAGJ7AXse0zMMQyK19VP-bHYsFUQUKGY_pc";
+String chatID = "8078505924";
+
+EnergyMonitor emon;
+
+#define vCalibration 112
+#define currCalibration 0.50
+
+#define RELAY_PIN 5
+
+float kWh = 0;
+unsigned long lastMillis = 0;
+
+BlynkTimer timer;
+
+float overVoltage = 250.0;
+float underVoltage = 180.0;
+
+void sendTelegram(String message) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ WiFi not connected");
+    return;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();  
+
+  HTTPClient https;
+
+  String url = "https://api.telegram.org/bot" + botToken + "/sendMessage";
+
+  https.begin(client, url);
+  https.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+  String postData = "chat_id=" + chatID + "&text=" + message;
+
+  Serial.println("📩 Sending Telegram...");
+  int httpCode = https.POST(postData);
+
+  Serial.print("HTTP Code: ");
+  Serial.println(httpCode);
+
+  https.end();
+}
+
+void connectWiFi() {
+  Serial.print("Connecting WiFi");
+
+  WiFi.begin(ssid, pass);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\n✅ WiFi Connected");
+}
+
+void measureEnergy() {
+
+  emon.calcVI(20, 2000);
+
+  float voltage = emon.Vrms;
+  float current = emon.Irms;
+  float power = emon.apparentPower;
+
+  // Energy Calculation
+  unsigned long now = millis();
+
+  kWh += power * (now - lastMillis) / 3600000000.0;
+
+  lastMillis = now;
+
+  Serial.print("Voltage: ");
+  Serial.print(voltage);
+  Serial.print(" V");
+
+  Serial.print(" | Current: ");
+  Serial.print(current);
+  Serial.print(" A");
+
+  Serial.print(" | Power: ");
+  Serial.print(power);
+  Serial.print(" W");
+
+  Serial.print(" | Energy: ");
+  Serial.print(kWh, 5);
+  Serial.println(" kWh");
+
+  static bool faultActive = false;
+
+  // Telegram cooldown
+  static unsigned long lastMessageTime = 0;
+
+  bool canSend =
+    (millis() - lastMessageTime > 10000);
+
+  if (voltage > overVoltage) {
+
+    digitalWrite(RELAY_PIN, LOW);
+
+    if (!faultActive && canSend) {
+
+      Serial.println("⚠ OVER VOLTAGE");
+      Serial.println("🔴 LOAD DISCONNECTED");
+
+      sendTelegram(
+        "⚠ OVER VOLTAGE ALERT!\n\n"
+        "Voltage: " + String(voltage) + " V\n"
+        "Current: " + String(current) + " A\n"
+        "Power: " + String(power) + " W\n"
+        "🔴 Load Disconnected"
+      );
+
+      lastMessageTime = millis();
+    }
+
+    faultActive = true;
+  }
+
+  else if (voltage < underVoltage) {
+
+    digitalWrite(RELAY_PIN, LOW);
+
+    if (!faultActive && canSend) {
+
+      Serial.println("⚠ UNDER VOLTAGE");
+      Serial.println("🔴 LOAD DISCONNECTED");
+
+      sendTelegram(
+        "⚠ UNDER VOLTAGE ALERT!\n\n"
+        "Voltage: " + String(voltage) + " V\n"
+        "Current: " + String(current) + " A\n"
+        "Power: " + String(power) + " W\n"
+        "🔴 Load Disconnected"
+      );
+
+      lastMessageTime = millis();
+    }
+
+    faultActive = true;
+  }
+
+
+  else {
+
+    digitalWrite(RELAY_PIN, HIGH);
+
+    if (faultActive && canSend) {
+
+      Serial.println("✅ VOLTAGE NORMAL");
+      Serial.println("🟢 LOAD RECONNECTED");
+
+      sendTelegram(
+        "✅ VOLTAGE NORMAL\n\n"
+        "Voltage: " + String(voltage) + " V\n"
+        "Current: " + String(current) + " A\n"
+        "Power: " + String(power) + " W\n"
+        "🟢 Load Reconnected"
+      );
+
+      lastMessageTime = millis();
+    }
+
+    faultActive = false;
+  }
+}
+void setup() {
+
+  Serial.begin(115200);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);
+
+  connectWiFi();
+
+  sendTelegram("🚀 ESP32 Smart Meter Started");
+
+  emon.voltage(35, vCalibration, 1.7);
+  emon.current(34, currCalibration);
+
+  delay(5000);
+
+  timer.setInterval(2000L, measureEnergy);
+}
+
+void loop() {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
+
+  timer.run();
+}  
